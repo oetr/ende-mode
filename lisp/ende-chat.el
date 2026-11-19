@@ -268,6 +268,8 @@ assistant role of its enclosing section."
 
 (defvar ende-chat--expired-history-in-request nil)
 (defvar ende-chat--reading-reply-reference nil)
+(defvar ende-chat--capability-origin nil
+  "Optional cell for the last capability reference read from selected history.")
 
 (cl-defstruct (ende-chat--document (:constructor ende-chat--make-document))
   "Parsed Org document and its headline relationships."
@@ -1053,7 +1055,8 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
   "Whether HEADLINE claims host context; with KIND, validate it before matching."
   (and (or (equal (ende-chat--property document headline :protocol-provider) "ende")
            (member (ende-chat--property document headline :protocol-item-kind) '("capabilities" "skills"))
-           (member (org-element-property :raw-value headline) '("Agent: Capabilities" "Agent: Skills")))
+           (and (member (org-element-property :raw-value headline) '("Agent: Capabilities" "Agent: Skills"))
+                (ende-chat--work-section-p document (ende-chat--parent document headline))))
        (or (null kind)
            (equal kind (ende-chat--validate-host-reference
                         document (ende-chat--parent document headline) headline)))))
@@ -1097,7 +1100,9 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
                 kind (ende-chat--property document headline :protocol-item-id)
                 (ende-chat--property document work :request-id)
                 (ende-chat--property document work :reply-to))))
-    (if (equal kind "capabilities") (ende-content-capabilities text) (ende-content-skills text))))
+    (if (equal kind "skills") (ende-content-skills text)
+      (when ende-chat--capability-origin (setcar ende-chat--capability-origin headline))
+      (ende-content-capabilities text))))
 
 (defun ende-chat--validate-opaque-reference (document work headline)
   "Validate opaque protocol HEADLINE under WORK."
@@ -1209,7 +1214,8 @@ SELECTED-WORK-P, when supplied, limits references to selected segments."
        (not (ende-chat--work-ancestor document headline))
        (cl-find-if
         (lambda (work)
-          (and (or (null selected-work-p) (funcall selected-work-p work))
+          (and (eq (ende-chat--parent document work) (ende-chat--parent document headline))
+               (or (null selected-work-p) (funcall selected-work-p work))
                (cl-some (lambda (child)
                           (ende-chat--property document child :reply-reference))
                         (ende-chat--children document work))))
@@ -1802,6 +1808,8 @@ FOLLOWING permits only FENCE's immediately following sibling task."
 (defun ende-chat--owned-skills-message (document owner reference)
   "Replay REFERENCE only if it holds the skills for OWNER's exact request."
   (unless (and (equal (ende-chat--property document reference :protocol-item-kind) "skills")
+               (eq (ende-chat--parent document (ende-chat--parent document reference))
+                   (ende-chat--parent document owner))
                (cl-every (lambda (key) (equal (ende-chat--property document reference key)
                                               (ende-chat--property document owner key)))
                          '(:request-id :reply-to)))
@@ -1815,12 +1823,29 @@ FOLLOWING permits only FENCE's immediately following sibling task."
       (unless (ende-chat--eligible-p document reference) (error "Hidden retained skill reference"))
       (ende-chat--owned-skills-message document boundary reference))))
 
+(defun ende-chat--answer-id (document node)
+  "Return NODE's request identity, including a linked reasoning section."
+  (or (ende-chat--property document node :request-id) (ende-chat--property document node :reasoning-for)))
+
 (defun ende-chat--other-answer-p (document node task request-id)
   "Whether NODE follows TASK and belongs to a different answer to it."
   (and (> (org-element-property :begin node) (org-element-property :begin task))
        (equal (ende-chat--property document node :reply-to) (ende-chat--property document task :id))
-       (when-let* ((id (ende-chat--property document node :request-id)))
+       (when-let* ((id (ende-chat--answer-id document node)))
          (not (equal id request-id)))))
+
+(defun ende-chat--latest-capability-reference (document task end &optional request-id validate)
+  "Find the newest in-scope capability header before END for TASK's REQUEST-ID.
+VALIDATE checks host claims when reading a retained source.  When deciding
+whether to issue a fresh snapshot, only inspect headers, not discarded Work."
+  (let ((start (org-element-property :begin (ende-chat--root document task))))
+    (cl-find-if (lambda (node)
+                  (and (<= start (org-element-property :begin node)) (< (org-element-property :begin node) end)
+                       (not (ende-chat--other-answer-p document node task request-id))
+                       (ende-chat--eligible-p document node)
+                       (if validate (ende-chat--host-reference-p document node "capabilities")
+                         (equal (ende-chat--property document node :protocol-item-kind) "capabilities"))))
+                (ende-chat--document-headlines document) :from-end t)))
 
 (defun ende-chat--retained-fence-messages (document fence)
   "Read FENCE's summary and validated task, host context and tool references."
@@ -1849,16 +1874,9 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                  (eq (not work) (not executions)))
       (error "Malformed retained context sources"))
     (when cap
-      (unless (eq cap (cl-find-if
-                       (lambda (node)
-                         (and (< (org-element-property :begin node)
-                                 (org-element-property :begin fence))
-                              (eq (ende-chat--root document node) (ende-chat--root document fence))
-                              (not (ende-chat--other-answer-p document node task
-                                                              (ende-chat--property document fence :request-id)))
-                              (ende-chat--eligible-p document node)
-                              (ende-chat--host-reference-p document node "capabilities")))
-                       (ende-chat--document-headlines document) :from-end t))
+      (unless (eq cap (ende-chat--latest-capability-reference
+                       document task (org-element-property :begin fence)
+                       (ende-chat--property document fence :request-id) t))
         (error "Retained capability source is not the current host snapshot")))
     (when work
       (unless (and (ende-chat--work-section-p document work)
@@ -1888,17 +1906,18 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                 message))
             messages)))
 
-(defun ende-chat--context-projection (job function)
+(defun ende-chat--context-projection (job function &optional preview)
   "Call FUNCTION in a temporary Org projection of JOB's completed input.
-Pass its document and pending destination.  Never checkpoint or edit the source."
-  (ende-chat--completed-entries job)
+Pass its document and pending destination.  Never checkpoint or edit the source.
+PREVIEW stops before any active exchange rather than requiring an idle boundary."
+  (unless preview (ende-chat--completed-entries job))
   (with-current-buffer (ende-target-buffer (ende-job-target job))
     (save-restriction
       (widen)
       (pcase-let* ((`(,document ,pending) (ende-chat--resolve-request-destination job 'snapshot))
                    (frontier (ende-chat--materialized-through document pending))
                    (suffix (ende-chat--transcript-suffix
-                            job (or (ende-chat--render-transcript job t) "") frontier))
+                            job (or (ende-chat--render-transcript job (if preview 'preview t)) "") frontier))
                    (position (org-element-property :begin pending))
                    (text (buffer-substring-no-properties (point-min) (point-max)))
                    (file buffer-file-name)
@@ -1944,7 +1963,7 @@ Pass its document and pending destination.  Never checkpoint or edit the source.
                      (and (memq (ende-chat--parent document node) selected)
                           (not (memq node selected))
                           (not (and (eq (ende-chat--parent document node) parent)
-                                    (or (equal (ende-chat--property document node :request-id) request-id)
+                                    (or (equal (ende-chat--answer-id document node) request-id)
                                         (ende-chat--context-fence-p document node)))))))))
     (ende-tool-store-call-with-replay
      (lambda ()
@@ -1999,42 +2018,34 @@ The snapshot is valid only for this running job, generation and source input."
             (skills (ende-chat--retained-skills document pending skills-id))
             (root (ende-chat--root document pending))
             (end (org-element-property :begin pending))
+            (cap (and caps (ende-chat--latest-capability-reference document task end request-id t)))
             (sources (list :task question-id))
             recent)
        (when skills (setq sources (plist-put sources :skills skills-id)))
        (when (and live-caps (not (equal live-caps caps)))
          (error "Authoritative capabilities do not match chat sources"))
+       (when caps
+         (unless (and cap (equal caps (ende-chat--protocol-host-message document cap)))
+           (error "Current capabilities have no retained source"))
+         (setq sources (plist-put sources :cap (ende-chat--property document cap :protocol-item-id))))
        (dolist (node (reverse (ende-chat--document-headlines document)))
-         (when (and (< (org-element-property :begin node) end)
-                    (eq (ende-chat--root document node) root))
-           (cond
-            ((and (not (plist-get sources :cap))
-                  (not (ende-chat--other-answer-p document node task request-id))
-                  (ende-chat--eligible-p document node)
-                  (ende-chat--host-reference-p document node "capabilities"))
-             (when (equal caps (ende-chat--protocol-host-message document node))
-               (setq sources (plist-put sources :cap
-                                        (ende-chat--property document node :protocol-item-id)))))
-            ((and (not recent) (ende-chat--tool-call-protocol-p document node)
-                  (ende-chat--eligible-p document node))
-             (let* ((work (ende-chat--work-ancestor document node))
-                    (id (ende-chat--property document work :id))
-                    (response (ende-chat--property document node :response-id))
-                    (batch (and id
-                                (condition-case nil
-                                    (ende-chat--tool-batch-messages document work response)
-                                  (error nil)))))
-               (when (and batch (cl-search batch context :test #'ende-chat--context-equal-p))
-                 (setq recent batch
-                       sources (plist-put sources :work id)
-                       sources (plist-put sources :response response)
-                       sources (plist-put sources :executions
-                                          (vconcat
-                                           (cl-loop for child in (ende-chat--tool-batch-children document work response)
-                                                    when (ende-chat--tool-call-protocol-p document child)
-                                                    collect (ende-chat--property document child :tool-execution-id)))))))))))
-       (when (and caps (not (plist-get sources :cap)))
-         (error "Current capabilities have no retained source"))
+         (when (and (not recent) (< (org-element-property :begin node) end)
+                    (eq (ende-chat--root document node) root)
+                    (ende-chat--tool-call-protocol-p document node) (ende-chat--eligible-p document node))
+           (let* ((work (ende-chat--work-ancestor document node))
+                  (id (ende-chat--property document work :id))
+                  (response (ende-chat--property document node :response-id))
+                  (batch (and id (condition-case nil (ende-chat--tool-batch-messages document work response)
+                                   (error nil)))))
+             (when (and batch (cl-search batch context :test #'ende-chat--context-equal-p))
+               (setq recent batch
+                     sources (plist-put sources :work id)
+                     sources (plist-put sources :response response)
+                     sources (plist-put sources :executions
+                                        (vconcat
+                                         (cl-loop for child in (ende-chat--tool-batch-children document work response)
+                                                  when (ende-chat--tool-call-protocol-p document child)
+                                                  collect (ende-chat--property document child :tool-execution-id)))))))))
        (let* ((canonical (ende-chat--context-with-metadata job (cons system context)))
               (retained (ende-chat--context-with-metadata
                          job (append (list system)
@@ -2191,35 +2202,63 @@ ROOT supplies the source scope when the destination is a new root sibling."
           (message "Some protocol payloads are unavailable; omitting affected history"))
         messages))))
 
-(defun ende-chat--context-messages (document headline)
-  "Read context through HEADLINE's selected section in its stored roles."
-  (ende-tool-store-call-with-replay
-   (lambda () (ende-chat--read-context-messages document headline))))
+(defun ende-chat--live-request (document owner)
+  "Return the live chat for pending OWNER, including a suspended parent."
+  (when (equal (ende-chat--property document owner :state) "pending")
+    (let ((request-id (ende-chat--property document owner :request-id))
+          (question-id (ende-chat--property document owner :reply-to)))
+      (when (eq owner (ende-chat--request-state-headline document request-id "pending"))
+        (cl-find-if (lambda (job)
+                      (and (eq (ende-job-type job) 'chat)
+                           (eq (ende-target-buffer (ende-job-target job)) (current-buffer))
+                           (equal request-id (plist-get (ende-job-instruction job) :request-id))
+                           (equal question-id (plist-get (ende-job-instruction job) :question-id))))
+                    (ende-all-live-jobs))))))
 
-(defun ende-chat--read-context-messages (document headline)
+(defun ende-chat--answer-section-p (document node)
+  "Whether NODE identifies a generated Work segment or reply."
+  (and (ende-chat--property document node :request-id)
+       (or (ende-chat--work-section-p document node) (equal (org-element-property :raw-value node) "Agent: Reply"))))
+
+(defun ende-chat--answer-task (document owner)
+  "Return the unique source task, if still present, for a generated Work or reply."
+  (when (ende-chat--answer-section-p document owner)
+    (when-let* ((id (ende-chat--property document owner :reply-to))
+                (root (ende-chat--root document owner))
+                (task (ende-chat--find-by-property document :id id root)))
+      (unless (and (< (org-element-property :begin task) (org-element-property :begin owner))
+                   (eq (ende-chat--parent document owner)
+                       (if (eq task root) task (ende-chat--parent document task))))
+        (error "Out-of-scope answer to chat task %s" id))
+      task)))
+
+(cl-defun ende-chat--context-messages
+    (document headline &optional (owner (ende-chat--generated-section-owner document headline)))
+  "Read context through HEADLINE's selected section in its stored roles."
+  (let ((ende-chat--expired-history-in-request nil))
+    (prog1
+        (ende-tool-store-call-with-replay
+         (lambda ()
+           (if-let* ((task (ende-chat--answer-task document owner)))
+               (if-let* ((job (ende-chat--live-request document owner)))
+                   (ende-chat--context-projection
+                    job (lambda (projected pending) (ende-chat--pending-context job projected pending)) t)
+                 (ende-chat--request-context document task owner t))
+             (ende-chat--read-context-messages document headline owner))))
+      (when ende-chat--expired-history-in-request
+        (message "Some protocol payloads are unavailable; omitting affected history")))))
+
+(defun ende-chat--read-context-messages (document headline owner)
   "Read HEADLINE's stored roles within the current replay scope."
-  (let* ((ende-chat--expired-history-in-request nil)
-         (owner (ende-chat--generated-section-owner document headline))
-         (section (or owner headline))
+  (let* ((section (or owner headline))
          (ancestors (ende-chat--reasoning-ancestors document headline))
-         (current (unless owner
-                    (ende-chat--current-headlines
-                     document section nil ancestors)))
-         (messages
-          (append
-           (ende-chat--context-prefix document section)
-           (ende-chat--section-messages
-            document section (org-element-property :begin section)
-            (org-element-property :end section)
-            (if owner
-                (lambda (node)
-                  (or (ende-chat--eligible-p document node)
-                      (memq node ancestors)))
-              (lambda (node) (memq node current)))
-            current))))
-    (when ende-chat--expired-history-in-request
-      (message "Some protocol payloads are unavailable; omitting affected history"))
-    messages))
+         (current (unless owner (ende-chat--current-headlines document section nil ancestors))))
+    (append (ende-chat--context-prefix document section)
+            (ende-chat--section-messages
+             document section (org-element-property :begin section) (org-element-property :end section)
+             (if owner (lambda (node) (or (ende-chat--eligible-p document node) (memq node ancestors)))
+               (lambda (node) (memq node current)))
+             current))))
 
 (defun ende-chat-context-at-point (&optional document)
   "Return stored-role chat context at point, excluding the system prompt.
@@ -2270,11 +2309,19 @@ an empty conversation."
             (insert "\n")))))
     (buffer-string)))
 
-(defun ende-chat--capability-update (messages environment)
-  "Return a host snapshot when ENVIRONMENT differs from MESSAGES' latest one."
+(defun ende-chat--capability-update (messages environment &optional document task)
+  "Return an authoritative snapshot when MESSAGES cannot supply ENVIRONMENT.
+For TASK in DOCUMENT, also record it if a later, unselected capability
+reference would obscure the inherited source at the reply destination."
   (let ((text (ende-chat-config-capabilities environment))
         (previous (cl-find-if #'ende-content-capabilities-p messages :from-end t)))
-    (unless (equal text (and previous (ende-content-body previous)))
+    (unless (and (equal text (and previous (ende-content-body previous)))
+                 (or (not task)
+                     (when-let* ((origin (car ende-chat--capability-origin)))
+                       (eq origin (ende-chat--latest-capability-reference
+                                   document task (if-let* ((id (ende-chat--property document task :id)))
+                                                     (ende-chat--insertion-position document task id)
+                                                   (org-element-property :end task)))))))
       (ende-content-capabilities text))))
 
 (defun ende-chat--capture-skills (document question policy)
@@ -2287,45 +2334,44 @@ an empty conversation."
 
 (defun ende-chat--preview-skills (document question policy)
   "Preview a draft QUESTION's skills, or replay its latest request's capture."
-  (when (and question (not (ende-chat--generated-section-owner document question))
-             (eq (ende-chat--effective-role document question) 'user)
+  (when (and question (eq (ende-chat--effective-role document question) 'user)
              (ende-chat--askable-p document question))
     (let* ((id (ende-chat--property document question :id))
-           (owner (and id (cl-find-if
-                           (lambda (node) (and (ende-chat--property document node :request-id)
-                                               (equal id (ende-chat--property document node :reply-to))))
-                           (ende-chat--document-headlines document) :from-end t))))
+           (root (and id (ende-chat--root document question)))
+           (owner (and id (ende-chat--find-by-property document :id id root)
+                       (cl-find-if
+                        (lambda (node) (and (ende-chat--answer-section-p document node)
+                                            (equal id (ende-chat--property document node :reply-to))))
+                        (if (eq root question) (ende-chat--children document question)
+                          (cdr (memq question (ende-chat--children document (ende-chat--parent document question)))))
+                        :from-end t))))
       (if (null owner) (ende-chat--capture-skills document question policy)
         (let* ((request-id (ende-chat--property document owner :request-id))
-               (reference (cl-find-if (lambda (node) (ende-chat--host-reference-p document node "skills"))
-                                      (ende-chat--request-headlines document request-id))))
-          (cond
-           (reference (ende-chat--owned-skills-message document owner reference))
-           ;; A running request may have checkpointed its input but not yet inserted Work.
-           ((equal (ende-chat--property document owner :state) "pending")
-            (when-let* ((job (cl-find-if
-                              (lambda (job)
-                                (and (eq (ende-job-type job) 'chat)
-                                     (eq (ende-target-buffer (ende-job-target job)) (current-buffer))
-                                     (equal id (plist-get (ende-job-instruction job) :question-id))
-                                     (equal request-id (plist-get (ende-job-instruction job) :request-id))))
-                              (ende-running-jobs)))
+               (refs (cl-remove-if-not
+                      (lambda (node) (and (eq root (ende-chat--root document node))
+                                          (ende-chat--host-reference-p document node "skills")))
+                      (ende-chat--request-headlines document request-id))))
+          (when (cdr refs) (error "Ambiguous skills for chat request %s" request-id))
+          (if refs (ende-chat--owned-skills-message document owner (car refs))
+            (when-let* ((job (ende-chat--live-request document owner))
                         (entry (ende-chat--skills-entry job)))
-              (ende-content-skills (ende-transcript-entry-content entry))))))))))
+              (ende-content-skills (ende-transcript-entry-content entry)))))))))
 
 (defun ende-chat--preview-messages (document)
   "Return context at point, previewing draft inputs without persisting them."
   (let* ((first (car (ende-chat--document-headlines document)))
          (headline (and first (>= (point) (org-element-property :begin first))
                         (ende-chat--headline-at-point document)))
-         (environment (ende-chat-config-resolve-environment
-                       (ende-chat--document-tree document)
-                       (ende-chat--document-parent document) headline))
+         (owner (and headline (ende-chat--generated-section-owner document headline)))
+         (ende-chat--capability-origin (list nil))
          (messages (cons (cons "system" (ende-chat--system-prompt document))
-                         (ende-chat-context-at-point document)))
-         (snapshot (ende-chat--capability-update messages environment))
-         (skills (ende-chat--preview-skills document headline (plist-get environment :access-policy))))
-    (append messages (delq nil (list snapshot skills)))))
+                         (when headline (ende-chat--context-messages document headline owner)))))
+    (if owner messages
+      (let* ((environment (ende-chat-config-resolve-environment
+                           (ende-chat--document-tree document) (ende-chat--document-parent document) headline))
+             (snapshot (ende-chat--capability-update messages environment document headline))
+             (skills (ende-chat--preview-skills document headline (plist-get environment :access-policy))))
+        (append messages (delq nil (list snapshot skills)))))))
 
 ;;;###autoload
 (defun ende-inspect-context-at-point ()
@@ -2410,13 +2456,14 @@ an empty conversation."
               (user-error "Point is not in an Org headline")))
       (error (user-error "Point is not in an Org headline")))))
 
-(defun ende-chat--find-by-property (document property value)
+(defun ende-chat--find-by-property (document property value &optional root)
   "Return the unique headline with PROPERTY equal to VALUE, or nil.
-Signal when the durable identifier is ambiguous."
+Signal when the durable identifier is ambiguous.  ROOT limits the lookup."
   (let ((matches
          (cl-remove-if-not
           (lambda (headline)
-            (equal (ende-chat--property document headline property) value))
+            (and (equal (ende-chat--property document headline property) value)
+                 (or (not root) (eq root (ende-chat--root document headline)))))
           (ende-chat--document-headlines document))))
     (when (> (length matches) 1)
       (error "Duplicate %s value: %s" property value))
@@ -3408,22 +3455,24 @@ Advance the pending frontier in the same transaction."
                       (org-entry-delete nil ende-chat-materialized-through-property))))
                 (set-marker marker nil)))))))))
 
-(defun ende-chat--completed-entries (job)
-  "Return JOB's entries, rejecting incomplete exchanges and final responses."
+(defun ende-chat--completed-entries (job &optional prefix)
+  "Return JOB's entries, rejecting incomplete exchanges and final responses.
+With PREFIX, return only the entries before the first such response."
   (let* ((transcript (ende-job-transcript job))
          (entries (and transcript (ende-transcript-entries transcript)))
          (results (cl-loop for entry in entries
                            when (eq (ende-transcript-entry-kind entry) 'tool-result)
                            collect (plist-get (ende-transcript-entry-data entry) :call))))
-    (when (cl-some (lambda (entry)
-                     (and (eq (ende-transcript-entry-kind entry) 'response)
-                          (or (not (eq (ende-transcript-entry-status entry) 'complete))
-                              (plist-get (ende-transcript-entry-data entry) :final)
-                              (cl-some (lambda (call) (not (memq call results)))
-                                       (plist-get (ende-transcript-entry-data entry) :calls)))))
-                   entries)
-      (error "Cannot checkpoint an active exchange or final response"))
-    entries))
+    (if-let* ((end (cl-position-if
+                    (lambda (entry)
+                      (and (eq (ende-transcript-entry-kind entry) 'response)
+                           (or (not (eq (ende-transcript-entry-status entry) 'complete))
+                               (plist-get (ende-transcript-entry-data entry) :final)
+                               (cl-some (lambda (call) (not (memq call results)))
+                                        (plist-get (ende-transcript-entry-data entry) :calls)))))
+                    entries)))
+        (if prefix (cl-subseq entries 0 end) (error "Cannot checkpoint an active exchange or final response"))
+      entries)))
 
 (defun ende-chat--materialize-work (job)
   "Append JOB's completed work without replacing any materialized sections.
@@ -4148,8 +4197,8 @@ Keep it while another queued compaction still refers to its durable identity."
 
 (add-hook 'ende-transcript-change-functions #'ende-chat--invalidate-rendering)
 
-(defun ende-chat--render-entry (job entry)
-  "Render ENTRY, retaining immutable output on its owner for JOB's parameters."
+(defun ende-chat--render-entry (job entry &optional preview)
+  "Render ENTRY, caching output on its owner for JOB unless this is a PREVIEW."
   (let* ((instruction (ende-job-instruction job))
          (level (plist-get instruction :response-level))
          (question-id (plist-get instruction :question-id))
@@ -4197,8 +4246,8 @@ Keep it while another queued compaction still refers to its durable identity."
                                        (ende-chat--provider-call-text
                                         (1+ level) request-id entry profile))
                                      (plist-get parts :work))))))))
-        (when (or (not (eq (ende-transcript-entry-kind entry) 'response))
-                  (eq (ende-transcript-entry-status entry) 'complete))
+        (when (and (not preview) (or (not (eq (ende-transcript-entry-kind entry) 'response))
+                                     (eq (ende-transcript-entry-status entry) 'complete)))
           (setf (plist-get (ende-transcript-entry-data entry) :chat-render)
                 (cons key rendered)))
         rendered))))
@@ -4221,7 +4270,8 @@ Keep it while another queued compaction still refers to its durable identity."
   "Serialize JOB's records into stable Work segments and sibling fences.
 Materialization boundaries remain in the full recovery snapshot; the pending
 reply's durable frontier determines which suffix may still be inserted.
-COMPLETED omits the snapshot's pending Work marker for live materialization."
+COMPLETED omits the snapshot's pending Work marker for live materialization.
+The value `preview' renders only completed exchanges, without caching."
   (when-let* ((transcript (ende-job-transcript job)))
     (let* ((instruction (ende-job-instruction job))
            (level (plist-get instruction :response-level))
@@ -4249,7 +4299,8 @@ COMPLETED omits the snapshot's pending Work marker for live materialization."
                (push (ende-chat--annotate-transcript-section
                       reply (ende-chat--transcript-range-properties start end)) sections))
              (setq work nil reply nil reasoning nil start (1+ end))))
-        (dolist (entry (ende-transcript-entries transcript))
+        (dolist (entry (if (eq completed 'preview) (ende-chat--completed-entries job t)
+                         (ende-transcript-entries transcript)))
           (cl-incf index)
           (let ((kind (ende-transcript-entry-kind entry)))
             (when (and (eq kind 'capabilities) (/= index 1))
@@ -4274,7 +4325,7 @@ COMPLETED omits the snapshot's pending Work marker for live materialization."
                            normalized t) sections))
                   (setq start (1+ index)))
               (when (memq kind '(capabilities skills summary progress tool-result response))
-                (let ((rendered (ende-chat--render-entry job entry)))
+                (let ((rendered (ende-chat--render-entry job entry (eq completed 'preview))))
                   (when-let* ((text (plist-get rendered :work)))
                     (unless (string-empty-p text) (push text work)))
                   (when (plist-get rendered :reply)
@@ -4923,6 +4974,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                       (tool-configuration
                        (plist-get environment :access-policy))
                       (skills (unless compact (ende-chat--capture-skills document question tool-configuration)))
+                      (ende-chat--capability-origin (list nil))
                       (messages
                        (let ((ende-chat--defer-attachments
                               (and (eq ende-llm-function #'ende-llm-default) 0)))
@@ -4936,7 +4988,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                            (ende-chat--serialize document question))))
                       (system-prompt (ende-chat--system-prompt document))
                       (request (cons (cons "system" system-prompt) messages))
-                      (snapshot (ende-chat--capability-update request environment)))
+                      (snapshot (ende-chat--capability-update request environment document (unless compact question))))
                  (unless compact
                    (setf (ende-job-instruction job)
                          (plist-put instruction :generated-title-function
