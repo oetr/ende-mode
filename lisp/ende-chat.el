@@ -1951,20 +1951,19 @@ PREVIEW stops before any active exchange rather than requiring an idle boundary.
   (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
     (error "Invalid ende-chat-context-policy: %s" ende-chat-context-policy))
   (let* ((ende-chat--continuation-task (ende-chat--property document task :id))
-         (request-id (ende-chat--property document destination :request-id))
+         (request-id (ende-chat--answer-id document destination))
          (root (ende-chat--root document task))
          (ancestors (ende-chat--reasoning-ancestors document task))
          (selected (ende-chat--current-headlines document task nil ancestors))
          (parent (ende-chat--parent document destination))
          (omit (lambda (node)
                  (or (ende-chat--other-answer-p document node task request-id)
-                     ;; Keep exactly the original task selection.  A root task's
-                     ;; continuations and fences are children, not siblings.
+                     ;; Independent children aren't part of the selected task.
+                     ;; A root task's own request segments are children too.
                      (and (memq (ende-chat--parent document node) selected)
                           (not (memq node selected))
                           (not (and (eq (ende-chat--parent document node) parent)
-                                    (or (equal (ende-chat--answer-id document node) request-id)
-                                        (ende-chat--context-fence-p document node)))))))))
+                                    (equal (ende-chat--answer-id document node) request-id))))))))
     (ende-tool-store-call-with-replay
      (lambda ()
        (ende-chat--section-messages
@@ -2221,8 +2220,9 @@ ROOT supplies the source scope when the destination is a new root sibling."
        (or (ende-chat--work-section-p document node) (equal (org-element-property :raw-value node) "Agent: Reply"))))
 
 (defun ende-chat--answer-task (document owner)
-  "Return the unique source task, if still present, for a generated Work or reply."
-  (when (ende-chat--answer-section-p document owner)
+  "Return the unique task for Work, reply or linked reasoning OWNER, if present."
+  (when (or (ende-chat--answer-section-p document owner)
+            (ende-chat--property document owner :reasoning-for))
     (when-let* ((id (ende-chat--property document owner :reply-to))
                 (root (ende-chat--root document owner))
                 (task (ende-chat--find-by-property document :id id root)))

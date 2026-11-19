@@ -1653,7 +1653,7 @@
            (ende-test--fake-llm
             '("First answer" (:tool-calls ((:id "read" :name "read_file"
                                             :arguments "{\"path\":\"sample.txt\",\"start_line\":1}")))
-              "Second answer" "Follow-up") t)))
+              (:content "Second answer" :thinking "Second reasoning") "Follow-up") t)))
       (make-directory (file-name-directory file) t)
       (with-temp-file file (insert "---\ndescription: Review changes.\n---\nOriginal instructions.\n"))
       (with-temp-file (expand-file-name "sample.txt" root) (insert "Completed exchange.\n"))
@@ -1709,6 +1709,13 @@
                 (should (string-search "review: Changed." draft))
                 (should-not (string-search "Replacement instructions." draft)))
               (delete-file file)
+              (ende-test--chat-goto "** Agent: Reasoning")
+              (dolist (ende-chat-include-reasoning '(nil t))
+                (let* ((messages (inspect))
+                       (text (ende-test--chat-context-text (cdr messages))))
+                  (should (equal (skills messages) (list explicit)))
+                  (should-not (string-match-p "First answer\\|Second answer" text))
+                  (should (eq (and (string-match-p "Second reasoning" text) t) ende-chat-include-reasoning))))
               (ende-test--chat-goto "** Agent: Reply")
               (should (equal (preview) (list implicit)))
               (ende-test--chat-goto "** Next")
