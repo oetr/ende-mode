@@ -31,12 +31,17 @@
 (require 'ende-chat-test-helpers)
 (require 'ende-skills)
 
+(defun ende-test--write-skill (root directory contents)
+  (let ((path (expand-file-name (concat ".agents/skills/" directory "/SKILL.md") root)))
+    (make-directory (file-name-directory path) t)
+    (with-temp-file path (insert contents))))
+
 (ert-deftest ende-test/skills-require-both-project-listing-and-reading ()
   (ende-test--with-project (root)
     (dolist (dir '("shared" "unlisted" "unreadable"))
-      (let ((path (expand-file-name (concat ".agents/skills/" dir "/SKILL.md") root)))
-        (make-directory (file-name-directory path) t)
-        (with-temp-file path (insert "---\ndescription: >-\n  Review\n  changes.\n---\nBody.\n"))))
+      (ende-test--write-skill
+       root dir (concat "---\nmetadata:\n  name: nested\n  short-description: Review changes\n"
+                        "allowed-tools: [read_file]\ndescription: >-\n  Review\n  changes.\n---\nBody.\n")))
     (with-temp-buffer
       (org-mode)
       (insert (ende-test--chat-config-block
@@ -60,6 +65,33 @@
           (let ((policy (ende-test--chat-config-at doc scope)))
             (should-not (ende-skills-catalog policy))
             (should-not (ende-skills-read entry policy))))))))
+
+(ert-deftest ende-test/skills-capture-bounds-catalog-not-explicit-selection ()
+  (ende-test--with-project (root)
+    (let ((names '("a" "b" "c" "d" "e" "f"))
+          (description (make-string 1024 ?界)))
+      (dolist (name names)
+        (ende-test--write-skill root name (format "---\ndescription: %s\n---\nBody of %s.\n"
+                                                  description name)))
+      (with-temp-buffer
+        (org-mode)
+        (insert (ende-test--chat-config-block
+                 `((root ,root) (skills t) (tools list_project_files read_file)
+                   (resource project (include "*"))
+                   (set-tool-resources list_project_files read_file :resources project)))
+                "* Question\n")
+        (let* ((policy (ende-test--chat-config-at (ende-chat--build-document) "Question"))
+               (listing (ende-skills-capture policy "List skills."))
+               (lines (seq-filter (lambda (s) (string-prefix-p "- " s)) (split-string listing "\n"))))
+          (should (<= (string-bytes listing) ende-skills--catalog-bytes))
+          (should (< 0 (length lines) (length names)))
+          (cl-mapc (lambda (line name)
+                     (should (equal line (format "- %s: %s (.agents/skills/%s/SKILL.md)"
+                                                 name description name))))
+                   lines names)
+          (should (string-search "omitted" listing))
+          (should (equal (ende-skills-capture policy "Use $f.")
+                         (concat listing "\n\nSelected skill: f (.agents/skills/f/SKILL.md)\nBody of f.\n"))))))))
 
 (provide 'ende-skills-test)
 

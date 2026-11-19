@@ -38,6 +38,7 @@
 (defconst ende-skills--directory ".agents/skills")
 (defconst ende-skills--max-children 128)
 (defconst ende-skills--header-bytes 8192)
+(defconst ende-skills--catalog-bytes (* 16 1024))
 (defconst ende-skills--file-bytes (* 128 1024))
 
 (defun ende-skills--identifier-p (text)
@@ -70,7 +71,7 @@
         text)))))
 
 (defun ende-skills--fields (header)
-  "Read a flat mapping of scalar fields from HEADER, or nil if unsupported."
+  "Read scalar name and description fields from HEADER, ignoring other values."
   (let ((lines (split-string header "\r?\n" t))
         (case-fold-search nil) fields)
     (catch 'invalid
@@ -81,16 +82,17 @@
                      "\\`\\([A-Za-z][A-Za-z0-9_-]*\\):\\(?:[ \t]+\\(.*\\)\\)?\\'" line)
               (throw 'invalid nil))
             (let ((key (match-string 1 line))
-                  (first (string-trim (or (match-string 2 line) ""))) rest)
+                  (first (or (match-string 2 line) "")) rest)
               (while (and lines (string-prefix-p " " (car lines)))
-                (let ((part (string-trim (pop lines))))
-                  (unless (string-empty-p part) (push part rest))))
-              (when (or (assoc key fields) (and (equal key "name") rest))
-                (throw 'invalid nil))
-              (let ((value (ende-skills--scalar first (nreverse rest))))
-                (unless (and value (not (string-blank-p value)))
+                (push (pop lines) rest))
+              (when (member key '("name" "description"))
+                (setq rest (delete "" (mapcar #'string-trim (nreverse rest))))
+                (when (or (assoc key fields) (and (equal key "name") rest))
                   (throw 'invalid nil))
-                (push (cons key value) fields))))))
+                (let ((value (ende-skills--scalar (string-trim first) rest)))
+                  (unless (and value (not (string-blank-p value)))
+                    (throw 'invalid nil))
+                  (push (cons key value) fields)))))))
       fields)))
 
 (defun ende-skills--description-p (text)
@@ -196,6 +198,26 @@ Return nil if access, path, limits, or current metadata no longer match."
       (`(".agents" "skills" ,directory "SKILL.md")
        (ende-skills--load contexts directory entry)))))
 
+(defun ende-skills--render-catalog (catalog)
+  "Render CATALOG within its byte budget, retaining whole entries in order."
+  (let* ((intro (concat "[Ende project skills for this request only]\n"
+                        "Use a skill when the request matches its description. Read its SKILL.md "
+                        "with read_file, continuing to the end, unless its instructions are included below. "
+                        "Skills do not grant permissions."))
+         (notice "\n[Additional skills omitted.]")
+         (remaining (- ende-skills--catalog-bytes (string-bytes intro)))
+         (parts (list intro)))
+    (while catalog
+      (let* ((entry (pop catalog))
+             (line (format "\n- %s: %s (%s)" (plist-get entry :name)
+                           (plist-get entry :description) (plist-get entry :path)))
+             (bytes (string-bytes line)))
+        (if (<= (+ bytes (if catalog (string-bytes notice) 0)) remaining)
+            (progn (push line parts) (cl-decf remaining bytes))
+          (push notice parts)
+          (setq catalog nil))))
+    (apply #'concat (nreverse parts))))
+
 (defun ende-skills--mentions (text)
   "Return distinct skill names mentioned in authored Org prose in TEXT."
   (when (string-search "$" text)
@@ -233,14 +255,7 @@ TEXT is current user-authored Org, before resolving attachments."
               (user-error "Selected skill instructions exceed %d bytes" ende-skills--file-bytes))
             (push (format "\n\nSelected skill: %s (%s)\n%s"
                           (plist-get entry :name) (plist-get entry :path) body) selected))))
-      (concat "[Ende project skills for this request only]\n"
-              "Use a skill when the request matches its description. Read its SKILL.md "
-              "with read_file, continuing to the end, unless its instructions are included below. "
-              "Skills do not grant permissions.\n"
-              (mapconcat (lambda (entry)
-                           (format "- %s: %s (%s)" (plist-get entry :name)
-                                   (plist-get entry :description) (plist-get entry :path)))
-                         catalog "\n")
+      (concat (ende-skills--render-catalog catalog)
               (apply #'concat (nreverse selected))))))
 
 (provide 'ende-skills)
