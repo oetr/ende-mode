@@ -48,6 +48,11 @@
   "Return captured project skill TEXT as user-level context, not a user task."
   (list :role "user" :host-kind 'skills :content text))
 
+(defun ende-content-user-task-p (message)
+  "Whether MESSAGE is user input rather than host-provided context."
+  (and (equal (ende-content-role message) "user")
+       (or (stringp (car message)) (not (plist-get message :host-kind)))))
+
 (defun ende-content-capabilities-p (message)
   "Return non-nil when MESSAGE is a host-typed capability snapshot."
   (and (consp message) (not (stringp (car message)))

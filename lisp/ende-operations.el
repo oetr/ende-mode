@@ -252,12 +252,9 @@ ON-EVENT, when supplied, replaces ordinary job event routing."
          "\n\n")))))
 
 (defun ende-operations--latest-user-message (messages)
-  "Return a readable rendering of the last user message in MESSAGES."
-  (let (latest)
-    (dolist (message messages)
-      (when (equal (ende-content-role message) "user")
-        (setq latest (ende-content-readable (ende-content-body message)))))
-    latest))
+  "Return a readable rendering of the last user task in MESSAGES."
+  (when-let* ((latest (cl-find-if #'ende-content-user-task-p messages :from-end t)))
+    (ende-content-readable (ende-content-body latest))))
 
 (defun ende-operations--add-source-metadata (job messages)
   "Prepend JOB's source metadata to the first user message in MESSAGES."
@@ -271,8 +268,7 @@ ON-EVENT, when supplied, replaces ordinary job event routing."
       (let ((added nil))
         (mapcar
          (lambda (message)
-           (if (and (not added)
-                    (equal (ende-content-role message) "user"))
+           (if (and (not added) (ende-content-user-task-p message))
                (progn
                  (setq added t)
                  (let ((content (ende-content-concat
