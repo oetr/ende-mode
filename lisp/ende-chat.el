@@ -568,10 +568,11 @@ Visibility controls the summary's inclusion, not whether old history returns."
               "t")
        (null (ende-chat--property document headline :state))))
 
-(defun ende-chat--fenced-siblings (document siblings before &optional level)
+(defun ende-chat--fenced-siblings (document siblings before &optional level omit-p)
   "Return SIBLINGS starting at their last completed fence before BEFORE.
 When LEVEL is non-nil, consider only fences at that heading level.
-The returned list shares structure with SIBLINGS."
+OMIT-P excludes subtrees before deciding which fence applies."
+  (when omit-p (setq siblings (cl-remove-if omit-p siblings)))
   (let ((start siblings))
     (cl-loop for tail on siblings
              for headline = (car tail)
@@ -582,10 +583,11 @@ The returned list shares structure with SIBLINGS."
              do (setq start tail))
     start))
 
-(defun ende-chat--context-start (document root question)
+(defun ende-chat--context-start (document root question &optional omit-p)
   "Return QUESTION's context start, bounded by a fence or ROOT.
 Search preceding siblings, then ascend.  The first fence found bounds the
-whole request; a fence inside another sibling's subtree does not."
+whole request; a fence inside another sibling's subtree does not.
+OMIT-P excludes subtrees belonging to a different selection."
   (let ((current question)
         fence)
     (while (and current (not fence))
@@ -596,7 +598,7 @@ whole request; a fence inside another sibling's subtree does not."
                (start (car (ende-chat--fenced-siblings
                             document siblings
                             (org-element-property :begin current)
-                            (org-element-property :level current)))))
+                            (org-element-property :level current) omit-p))))
           (when (and start
                      (< (org-element-property :begin start)
                         (org-element-property :begin current))
@@ -854,10 +856,11 @@ around rendered chat sections, not arbitrary text slices."
          ende-chat--defer-attachments)))))
 
 (defun ende-chat--section-messages
-    (document root start end &optional include-p selected-headlines)
+    (document root start end &optional include-p selected-headlines omit-p)
   "Read ROOT's sections within START..END, preserving roles and visibility.
 INCLUDE-P selects sections instead of the normal eligibility policy.
-SELECTED-HEADLINES supplies an already selected current section."
+SELECTED-HEADLINES supplies an already selected current section.
+Otherwise OMIT-P prunes subtrees before applying fences."
   (let ((messages nil)
         (parts nil)
         (message-owner nil)
@@ -955,9 +958,9 @@ SELECTED-HEADLINES supplies an already selected current section."
                  (setq fragment-end (ende-chat--headline-end document headline)))
                (dolist (child (if selected-headlines
                                   (ende-chat--children document headline)
-				(ende-chat--fenced-siblings
+                                (ende-chat--fenced-siblings
                                  document (ende-chat--children document headline)
-                                 end)))
+                                 end nil omit-p)))
                  (walk child next-owner next-role next-presentation)))))))
       (catch 'ende-chat--sections-read
         (walk root nil (ende-chat--effective-role document root) nil))
@@ -1812,6 +1815,13 @@ FOLLOWING permits only FENCE's immediately following sibling task."
       (unless (ende-chat--eligible-p document reference) (error "Hidden retained skill reference"))
       (ende-chat--owned-skills-message document boundary reference))))
 
+(defun ende-chat--other-answer-p (document node task request-id)
+  "Whether NODE follows TASK and belongs to a different answer to it."
+  (and (> (org-element-property :begin node) (org-element-property :begin task))
+       (equal (ende-chat--property document node :reply-to) (ende-chat--property document task :id))
+       (when-let* ((id (ende-chat--property document node :request-id)))
+         (not (equal id request-id)))))
+
 (defun ende-chat--retained-fence-messages (document fence)
   "Read FENCE's summary and validated task, host context and tool references."
   (let* ((sources (json-parse-string (ende-chat--property document fence :context-sources)
@@ -1844,6 +1854,8 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                          (and (< (org-element-property :begin node)
                                  (org-element-property :begin fence))
                               (eq (ende-chat--root document node) (ende-chat--root document fence))
+                              (not (ende-chat--other-answer-p document node task
+                                                              (ende-chat--property document fence :request-id)))
                               (ende-chat--eligible-p document node)
                               (ende-chat--host-reference-p document node "capabilities")))
                        (ende-chat--document-headlines document) :from-end t))
@@ -1915,30 +1927,43 @@ Pass its document and pending destination.  Never checkpoint or edit the source.
   (let ((ende-chat-context-policy 'current-section-only))
     (ende-chat--serialize document task)))
 
-(defun ende-chat--pending-context (job document pending)
-  "Read JOB's selected task and completed input before PENDING."
+(defun ende-chat--request-context (document task destination &optional through)
+  "Read TASK's request history up to DESTINATION, including it if THROUGH."
   (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
     (error "Invalid ende-chat-context-policy: %s" ende-chat-context-policy))
-  (let* ((instruction (ende-job-instruction job))
-         (ende-chat--continuation-task (plist-get instruction :question-id))
-         (task (ende-chat--context-source document pending :id ende-chat--continuation-task))
-         (request-id (plist-get instruction :request-id))
-         (end (org-element-property :begin pending))
-         (fence (cl-find-if (lambda (node) (and (< (org-element-property :begin node) end)
-                                                (ende-chat--context-fence-p document node)))
-                            (ende-chat--request-headlines document request-id) :from-end t))
-         (before-task (and fence (< (org-element-property :begin fence) (org-element-property :begin task))))
-         (output (if (and fence (not before-task)) fence
-                   (car (ende-chat--request-work-sections document request-id)))))
+  (let* ((ende-chat--continuation-task (ende-chat--property document task :id))
+         (request-id (ende-chat--property document destination :request-id))
+         (root (ende-chat--root document task))
+         (ancestors (ende-chat--reasoning-ancestors document task))
+         (selected (ende-chat--current-headlines document task nil ancestors))
+         (parent (ende-chat--parent document destination))
+         (omit (lambda (node)
+                 (or (ende-chat--other-answer-p document node task request-id)
+                     ;; Keep exactly the original task selection.  A root task's
+                     ;; continuations and fences are children, not siblings.
+                     (and (memq (ende-chat--parent document node) selected)
+                          (not (memq node selected))
+                          (not (and (eq (ende-chat--parent document node) parent)
+                                    (or (equal (ende-chat--property document node :request-id) request-id)
+                                        (ende-chat--context-fence-p document node)))))))))
     (ende-tool-store-call-with-replay
      (lambda ()
-       ;; A re-ask selects the same task, not the intervening answers to it.
-       (append (cond ((null fence) (ende-chat--serialize document task))
-                     (before-task (append (ende-chat--retained-fence-messages document fence)
-                                          (ende-chat--selected-task-messages document task))))
-               (when output
-                 (ende-chat--section-messages document (ende-chat--root document task)
-                                              (org-element-property :begin output) end)))))))
+       (ende-chat--section-messages
+        document root (ende-chat--context-start document root destination omit)
+        (org-element-property (if through :end :begin) destination)
+        (lambda (node)
+          (or (memq node selected) (memq node ancestors)
+              (and (or (eq ende-chat-context-policy 'root-prefix)
+                       (>= (org-element-property :begin node) (org-element-property :begin task))
+                       (equal (ende-chat--property document node :request-id) request-id))
+                   (ende-chat--eligible-p document node))))
+        nil omit)))))
+
+(defun ende-chat--pending-context (job document pending)
+  "Read JOB's selected task and completed input before PENDING."
+  (ende-chat--request-context
+   document (ende-chat--context-source document pending :id (plist-get (ende-job-instruction job) :question-id))
+   pending))
 
 (defun ende-chat--context-stamp (job)
   "Return a cheap invalidation stamp for JOB's effective context."
@@ -1984,6 +2009,7 @@ The snapshot is valid only for this running job, generation and source input."
                     (eq (ende-chat--root document node) root))
            (cond
             ((and (not (plist-get sources :cap))
+                  (not (ende-chat--other-answer-p document node task request-id))
                   (ende-chat--eligible-p document node)
                   (ende-chat--host-reference-p document node "capabilities"))
              (when (equal caps (ende-chat--protocol-host-message document node))
