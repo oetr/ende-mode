@@ -686,6 +686,10 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--error "root expects one path string"))
      (plist-put configuration :root
                 (ende-chat-config--canonical-root (cadr form))))
+    ('skills
+     (unless (and (= (length form) 2) (memq (cadr form) '(t nil)))
+       (ende-chat-config--error "skills expects t or nil"))
+     (plist-put configuration :skills (cadr form)))
     ('podman-image
      (unless (= (length form) 2)
        (ende-chat-config--error "podman-image expects one image string"))
@@ -769,7 +773,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
          (key (pcase operation
                 ((or 'group 'resource 'agent-config)
                  (cons operation (cadr form)))
-                ((or 'root 'podman-image 'spawn-agent-config
+                ((or 'root 'skills 'podman-image 'spawn-agent-config
                      'restrict-host-commands)
                  operation))))
     (when key
@@ -814,7 +818,7 @@ Duplicate declarations are local to this evaluation, not inherited state."
 
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
-  (list :root nil :podman-image nil :groups nil :resources nil
+  (list :root nil :skills nil :podman-image nil :groups nil :resources nil
         :provider nil :model nil
         :active-targets nil :excluded-tools nil
         :host-command-policy nil
@@ -830,6 +834,7 @@ Duplicate declarations are local to this evaluation, not inherited state."
             (plist-get configuration :excluded-tools))))
          (configured-policy (plist-get configuration :host-command-policy)))
     (list :root (plist-get configuration :root)
+          :skills (plist-get configuration :skills)
           :provider (plist-get configuration :provider)
           :model (plist-get configuration :model)
           :podman-image (plist-get configuration :podman-image)
