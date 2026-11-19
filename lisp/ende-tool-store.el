@@ -172,9 +172,7 @@ Ende directory has its existing permissions changed."
               (if create
                   (ende-tool-store--initialize database filename)
                 (sqlite-execute database "PRAGMA query_only = ON")
-                (ende-tool-store--check-version database filename)
-                (sqlite-select database "SELECT execution_id, kind, payload FROM tool_payloads LIMIT 0")
-                (sqlite-select database "SELECT id, provider, kind, payload FROM protocol_items LIMIT 0"))
+                (ende-tool-store--check-version database filename))
               database)
           ((error quit)
            (sqlite-close database)
