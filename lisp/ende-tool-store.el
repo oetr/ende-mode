@@ -95,11 +95,12 @@
           '("" "-wal" "-shm" "-journal")))
 
 (defun ende-tool-store--set-modes (file modes)
-  "Set FILE's MODES without following a symbolic link.
+  "Ensure FILE has MODES without following a symbolic link.
 Verify Unix permission bits on platforms that support them."
-  (set-file-modes file modes 'nofollow)
-  (unless (memq system-type '(windows-nt ms-dos))
-    (unless (= (logand (file-modes file 'nofollow) #o7777) modes)
+  (unless (equal (file-modes file 'nofollow) modes)
+    (set-file-modes file modes 'nofollow)
+    (unless (or (memq system-type '(windows-nt ms-dos))
+                (= (logand (file-modes file 'nofollow) #o7777) modes))
       (error "Cannot enforce tool store permissions on %s" file))))
 
 (defun ende-tool-store--protect-files (filename &optional create)
@@ -129,31 +130,33 @@ Ende directory has its existing permissions changed."
     (user-error
      "Tool payload storage requires an Emacs build with SQLite support")))
 
-(defun ende-tool-store--initialize (database filename)
-  "Initialize schema-version-zero DATABASE at FILENAME."
+(defun ende-tool-store--check-version (database filename &optional create)
+  "Return DATABASE's schema version at FILENAME, allowing zero only when CREATE."
   (let ((version (caar (sqlite-select database "PRAGMA user_version"))))
-    (cond
-     ((= version 0)
-      (sqlite-execute
-       database
-       (concat "CREATE TABLE tool_payloads ("
-               "execution_id TEXT NOT NULL, "
-               "kind TEXT NOT NULL CHECK (kind IN ('request', 'result')), "
-               "payload TEXT NOT NULL, "
-               "PRIMARY KEY (execution_id, kind))"))
-      (sqlite-execute
-       database (format "PRAGMA user_version = %d"
-                        ende-tool-store--schema-version)))
-     ((/= version ende-tool-store--schema-version)
+    (unless (or (= version ende-tool-store--schema-version)
+                (and create (zerop version)))
       (error "Unsupported tool payload database schema version %s in %s; use a fresh database by changing `ende-tool-store-file'"
              version filename))
-     (t nil)))
+    version))
+
+(defun ende-tool-store--initialize (database filename)
+  "Initialize writable DATABASE at FILENAME."
+  (when (zerop (ende-tool-store--check-version database filename t))
+    (sqlite-execute
+     database
+     (concat "CREATE TABLE tool_payloads ("
+             "execution_id TEXT NOT NULL, "
+             "kind TEXT NOT NULL CHECK (kind IN ('request', 'result')), "
+             "payload TEXT NOT NULL, "
+             "PRIMARY KEY (execution_id, kind))"))
+    (sqlite-execute
+     database (format "PRAGMA user_version = %d" ende-tool-store--schema-version)))
   (sqlite-execute database "DROP TABLE IF EXISTS assistant_protocol")
   (sqlite-execute database
                   "CREATE TABLE IF NOT EXISTS protocol_items (id TEXT PRIMARY KEY, provider TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)"))
 
 (defun ende-tool-store--open (filename create)
-  "Open and validate FILENAME.  CREATE allows making a missing database."
+  "Open FILENAME for queries.  CREATE allows writing and initializing it."
   (ende-tool-store--check-sqlite)
   (ende-tool-store--protect-files filename create)
   (let ((exists (file-exists-p filename)))
@@ -166,7 +169,12 @@ Ende directory has its existing permissions changed."
                        filename (error-message-string error-data))))))
         (condition-case error-data
             (progn
-              (ende-tool-store--initialize database filename)
+              (if create
+                  (ende-tool-store--initialize database filename)
+                (sqlite-execute database "PRAGMA query_only = ON")
+                (ende-tool-store--check-version database filename)
+                (sqlite-select database "SELECT execution_id, kind, payload FROM tool_payloads LIMIT 0")
+                (sqlite-select database "SELECT id, provider, kind, payload FROM protocol_items LIMIT 0"))
               database)
           ((error quit)
            (sqlite-close database)

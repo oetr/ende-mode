@@ -100,6 +100,19 @@
           (should-not (file-exists-p ende-tool-store-file)))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/tool-store-reads-never-initialize-or-update ()
+  (let ((file (make-temp-file "ende-tool-store-")))
+    (unwind-protect
+        (progn
+          (should-error (ende-tool-store-get "execution" 'request file))
+          (should (zerop (file-attribute-size (file-attributes file))))
+          (ende-tool-store-put "execution" 'request "exact" file)
+          (should-error
+           (ende-tool-store--call-with-database
+            nil (lambda (database) (sqlite-execute database "DELETE FROM tool_payloads")) file))
+          (should (equal (ende-tool-store-get "execution" 'request file) "exact")))
+      (delete-file file))))
+
 (ert-deftest ende-test/tool-store-roundtrips-immutable-records-and-switches-files ()
   (let* ((directory (make-temp-file "ende-tool-store-" t))
          (first (expand-file-name "first.sqlite3" directory))
