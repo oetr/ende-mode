@@ -224,20 +224,42 @@ Return nil if access, path, limits, or current metadata no longer match."
     (with-temp-buffer
       (delay-mode-hooks (org-mode))
       (insert (plist-get (ende-org--blocks text) :parse-content))
-      (goto-char (point-min))
-      (let ((case-fold-search nil) names)
-        (while (re-search-forward "\\$\\([A-Za-z0-9][A-Za-z0-9_-]*\\)" nil t)
-          (let ((name (match-string-no-properties 1))
-                (start (match-beginning 0)))
-            (when (save-excursion
-                    (goto-char start)
-                    (and (not (memq (char-before) '(?\\ ?$)))
-                         (not (memq (char-syntax (or (char-before) ?\s)) '(?w ?_)))
-                         (not (org-element-lineage
-                               (org-element-context)
-                               '(code verbatim link inline-src-block fixed-width drawer
-                                 property-drawer keyword comment) t))))
-              (push name names))))
+      (let ((case-fold-search nil)
+            (markup (cl-set-difference org-element-all-objects '(subscript superscript)))
+            names)
+        (cl-labels
+            ((scan (begin end)
+               (goto-char begin)
+               (while (and (< (point) end)
+                           (re-search-forward "\\$\\([A-Za-z0-9][A-Za-z0-9_-]*\\)" end t))
+                 (let* ((start (match-beginning 0)) (before (char-before start)))
+                   (unless (or (memq before '(?\\ ?$))
+                               (and (/= start begin)
+                                    (memq (char-syntax (or before ?\s)) '(?w ?_))))
+                     (push (match-string-no-properties 1) names)))))
+             (prose (begin end objects)
+               ;; Scan source spans: Org can split $skill_name at the subscript.
+               (org-element-map objects markup
+                 (lambda (object)
+                   (scan begin (org-element-begin object))
+                   (when (memq (org-element-type object) '(bold italic underline strike-through))
+                     (prose (org-element-contents-begin object) (org-element-contents-end object)
+                            (org-element-contents object)))
+                   (setq begin (org-element-end object)))
+                 nil nil markup)
+               (scan begin end)))
+          (org-element-map (org-element-parse-buffer) '(paragraph headline)
+            (lambda (node)
+              (cond
+               ((eq (org-element-type node) 'paragraph)
+                (prose (org-element-contents-begin node) (org-element-contents-end node)
+                       (org-element-contents node)))
+               ((org-element-property :commentedp node) (throw :org-element-skip nil))
+               (t
+                (goto-char (org-element-begin node))
+                (when (and (looking-at org-complex-heading-regexp) (match-beginning 4))
+                  (prose (match-beginning 4) (match-end 4) (org-element-property :title node))))))
+            nil nil '(drawer property-drawer dynamic-block)))
         (delete-dups (nreverse names))))))
 
 (defun ende-skills-capture (policy text)

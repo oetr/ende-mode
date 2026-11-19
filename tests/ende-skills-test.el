@@ -93,6 +93,21 @@
           (should (equal (ende-skills-capture policy "Use $f.")
                          (concat listing "\n\nSelected skill: f (.agents/skills/f/SKILL.md)\nBody of f.\n"))))))))
 
+(ert-deftest ende-test/skills-select-mentions-only-in-authored-org-prose ()
+  (should
+   (equal (ende-skills--mentions
+           (concat "* Use $head_name, not =$literal= or [[file:x][$label]].\n"
+                   ":PROPERTIES:\n:NOTE: $property\n:END:\n"
+                   "Please use $one and $two. Repeat $one.\n"
+                   "Ignore ~$code~, src_text{$src}, call_demo(x=\"$arg\"), and [[file:$path]].\n"
+                   "Also ignore \\$escaped, $$doubled, word$embedded, and $math$.\n"
+                   "#+CALL: demo(x=\"literal $call\")\n#+CAPTION: $caption\n"
+                   "Then *$bold* and $last-name.\n"
+                   ":DRAWER:\n$drawer\n:END:\n: $fixed\n# $comment\n| $table |\n"
+                   "#+begin_src org\n* $forged\n#+end_src\n"
+                   "* COMMENT $hidden\n$ignored\n"))
+          '("head_name" "one" "two" "bold" "last-name"))))
+
 (provide 'ende-skills-test)
 
 ;;; ende-skills-test.el ends here
