@@ -925,8 +925,8 @@ SELECTED-HEADLINES supplies an already selected current section."
                  (push headline selected-work)
                  (setq messages
                        (append (reverse tool-messages) messages))))
-              ((and selected (ende-chat--capabilities-reference-p document headline))
-               (error "Host capabilities must be the first child of Agent: Work"))
+              ((and selected (ende-chat--host-reference-p document headline))
+               (error "Host context reference outside Agent: Work"))
               ((and selected (ende-chat--opaque-reference-p document headline))
                (flush)
                (let ((event (ende-chat--protocol-opaque-message document headline)))
@@ -1045,22 +1045,31 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
       (ende-chat--property document headline :protocol-provider)
       (ende-chat--property document headline :protocol-item-id)))
 
-(defun ende-chat--capabilities-reference-p (document headline)
-  "Return non-nil when HEADLINE claims to be host capability metadata."
-  (or (equal (ende-chat--property document headline :protocol-item-kind) "capabilities")
-      (equal (ende-chat--property document headline :protocol-provider) "ende")
-      (equal (org-element-property :raw-value headline) "Agent: Capabilities")))
+(defun ende-chat--host-reference-p (document headline &optional kind)
+  "Whether HEADLINE claims host context; with KIND, validate it before matching."
+  (and (or (equal (ende-chat--property document headline :protocol-provider) "ende")
+           (member (ende-chat--property document headline :protocol-item-kind) '("capabilities" "skills"))
+           (member (org-element-property :raw-value headline) '("Agent: Capabilities" "Agent: Skills")))
+       (or (null kind)
+           (equal kind (ende-chat--validate-host-reference
+                        document (ende-chat--parent document headline) headline)))))
 
-(defun ende-chat--validate-capabilities-reference (document work headline)
-  "Validate the bodyless host capability HEADLINE's identity and placement."
-  (let ((question-id (ende-chat--property document work :reply-to))
+(defun ende-chat--validate-host-reference (document work headline)
+  "Validate host HEADLINE's identity and placement in WORK; return its kind."
+  (let ((kind (ende-chat--property document headline :protocol-item-kind))
+        (children (ende-chat--children document work))
+        (question-id (ende-chat--property document work :reply-to))
         (item-id (ende-chat--property document headline :protocol-item-id)))
-    (unless (and (eq headline (car (ende-chat--children document work)))
+    (unless (and (ende-chat--work-section-p document work)
+                 (member kind '("capabilities" "skills"))
+                 (eq headline (if (and (equal kind "skills")
+                                       (equal (ende-chat--property document (car children) :protocol-item-kind)
+                                              "capabilities"))
+                                  (cadr children) (car children)))
                  (eq (ende-chat--parent document headline) work)
                  (= (org-element-property :level headline) (1+ (org-element-property :level work)))
-                 (equal (org-element-property :raw-value headline) "Agent: Capabilities")
+                 (equal (org-element-property :raw-value headline) (concat "Agent: " (capitalize kind)))
                  (equal (ende-chat--property document headline :protocol-provider) "ende")
-                 (equal (ende-chat--property document headline :protocol-item-kind) "capabilities")
                  (equal (ende-chat--property document headline :request-id)
                         (ende-chat--property document work :request-id))
                  (stringp question-id) (not (string-empty-p question-id))
@@ -1073,17 +1082,17 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
                  (not (ende-chat--tool-reference-p document headline))
                  (null (ende-chat--children document headline))
                  (string-blank-p (ende-chat--protocol-body-string headline)))
-      (error "Malformed generated host capability reference")))
-  headline)
+      (error "Malformed generated host context reference"))
+    kind))
 
-(defun ende-chat--protocol-capabilities-message (document work headline)
-  "Replay HEADLINE's exact host snapshot under WORK, never regenerating it."
-  (ende-chat--validate-capabilities-reference document work headline)
-  (ende-content-capabilities
-   (ende-tool-store-load-capabilities
-    (ende-chat--property document headline :protocol-item-id)
-    (ende-chat--property document work :request-id)
-    (ende-chat--property document work :reply-to))))
+(defun ende-chat--protocol-host-message (document work headline)
+  "Replay HEADLINE's exact host input under WORK, never regenerating it."
+  (let* ((kind (ende-chat--validate-host-reference document work headline))
+         (text (ende-tool-store-load-host-text
+                kind (ende-chat--property document headline :protocol-item-id)
+                (ende-chat--property document work :request-id)
+                (ende-chat--property document work :reply-to))))
+    (if (equal kind "capabilities") (ende-content-capabilities text) (ende-content-skills text))))
 
 (defun ende-chat--validate-opaque-reference (document work headline)
   "Validate opaque protocol HEADLINE under WORK."
@@ -1261,8 +1270,8 @@ SELECTED-WORK-P, when supplied, limits references to selected segments."
       (error "Malformed generated Agent: Work: missing request ID"))
     (dolist (child (ende-chat--children document work))
       (cond
-       ((ende-chat--capabilities-reference-p document child)
-        (ende-chat--validate-capabilities-reference document work child))
+       ((ende-chat--host-reference-p document child)
+        (ende-chat--validate-host-reference document work child))
        ((ende-chat--provider-call-p document child)
         (ende-chat--validate-provider-call document work child))
        ((ende-chat--property document child :reply-reference)
@@ -1322,8 +1331,8 @@ SELECTED-WORK-P, when supplied, limits references to selected segments."
         (unless (equal (ende-chat--property document child :role) "assistant")
           (error "Malformed generated assistant protocol role"))
         (ende-chat--protocol-body-string child))
-       ((ende-chat--capabilities-reference-p document child)
-        (ende-chat--validate-capabilities-reference document work child))
+       ((ende-chat--host-reference-p document child)
+        (ende-chat--validate-host-reference document work child))
        ((ende-chat--opaque-reference-p document child)
         (ende-chat--validate-opaque-reference document work child))
        ((or (ende-chat--provider-call-p document child)
@@ -1661,8 +1670,8 @@ edited role boundary does not own a second copy of its native reasoning."
         (cond
          ((equal (ende-chat--property document child :visibility)
                  "reasoning_summary"))
-         ((ende-chat--capabilities-reference-p document child)
-          (push (ende-chat--protocol-capabilities-message document work child) messages))
+         ((ende-chat--host-reference-p document child)
+          (push (ende-chat--protocol-host-message document work child) messages))
          ((ende-chat--opaque-reference-p document child)
           (funcall flush)
           (let ((event (ende-chat--protocol-opaque-message document child)))
@@ -1812,7 +1821,7 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                                  (org-element-property :begin fence))
                               (eq (ende-chat--root document node) (ende-chat--root document fence))
                               (ende-chat--eligible-p document node)
-                              (ende-chat--capabilities-reference-p document node)))
+                              (ende-chat--host-reference-p document node "capabilities")))
                        (ende-chat--document-headlines document) :from-end t))
         (error "Retained capability source is not the current host snapshot")))
     (when work
@@ -1826,7 +1835,7 @@ FOLLOWING permits only FENCE's immediately following sibling task."
      (ende-chat--fence-summary-messages document fence)
      (unless before
        (ende-chat--selected-task-messages document task))
-     (when cap (list (ende-chat--protocol-capabilities-message
+     (when cap (list (ende-chat--protocol-host-message
                      document (ende-chat--work-ancestor document cap) cap)))
      (when work (ende-chat--tool-batch-messages document work response)))))
 
@@ -1952,8 +1961,8 @@ The snapshot is valid only for this running job, generation and source input."
            (cond
             ((and (not (plist-get sources :cap))
                   (ende-chat--eligible-p document node)
-                  (ende-chat--capabilities-reference-p document node))
-             (when (equal caps (ende-chat--protocol-capabilities-message
+                  (ende-chat--host-reference-p document node "capabilities"))
+             (when (equal caps (ende-chat--protocol-host-message
                                document (ende-chat--work-ancestor document node) node))
                (setq sources (plist-put sources :cap
                                         (ende-chat--property document node :protocol-item-id)))))
@@ -4064,16 +4073,16 @@ Keep it while another queued compaction still refers to its durable identity."
         (cdr cached)
       (let ((rendered
              (pcase (ende-transcript-entry-kind entry)
-               ('capabilities
+               ((and (or 'capabilities 'skills) kind)
                 (unless (and (eq (ende-transcript-entry-status entry) 'complete)
                              (stringp (plist-get data :item-id)))
-                  (error "Cannot render an incomplete capability record"))
+                  (error "Cannot render an incomplete host %s record" kind))
                 (list :work
-                      (concat (make-string (1+ level) ?*) " Agent: Capabilities\n:PROPERTIES:\n"
+                      (concat (make-string (1+ level) ?*) " Agent: " (capitalize (symbol-name kind)) "\n:PROPERTIES:\n"
                               (ende-chat--response-property ende-chat-request-id-property request-id)
                               (ende-chat--response-property ende-chat-reply-to-property question-id)
                               (ende-chat--response-property ende-chat-protocol-provider-property "ende")
-                              (ende-chat--response-property ende-chat-protocol-item-kind-property "capabilities")
+                              (ende-chat--response-property ende-chat-protocol-item-kind-property (symbol-name kind))
                               (ende-chat--response-property ende-chat-protocol-item-id-property
                                                             (plist-get data :item-id))
                               ":END:\n\n")))
@@ -4175,7 +4184,7 @@ COMPLETED omits the snapshot's pending Work marker for live materialization."
                             (ende-chat--normalized-response-properties normalized))
                            normalized t) sections))
                   (setq start (1+ index)))
-              (when (memq kind '(capabilities summary progress tool-result response))
+              (when (memq kind '(capabilities skills summary progress tool-result response))
                 (let ((rendered (ende-chat--render-entry job entry)))
                   (when-let* ((text (plist-get rendered :work)))
                     (unless (string-empty-p text) (push text work)))

@@ -38,6 +38,8 @@
 (declare-function ende-job-ensure-transcript "ende-queue" (job))
 (declare-function ende-tool-store-save-capabilities "ende-tool-store"
                   (request-id question-id text &optional filename))
+(declare-function ende-tool-store-save-skills "ende-tool-store"
+                  (request-id question-id text &optional filename))
 
 (cl-defstruct (ende-transcript (:constructor ende-transcript-create))
   task entries tail (next-id 0) (round 0) response terminal metadata usage
@@ -130,21 +132,32 @@ content change; `metadata' changes only status, headings, or attribution."
     (ende-transcript-notify transcript entry 'replace)
     entry))
 
-(defun ende-transcript-record-capabilities (job text &optional request-id question-id)
-  "Durably record JOB's exact capability TEXT as its first transcript entry.
-REQUEST-ID and QUESTION-ID default to JOB's instruction properties.  Storage
-uses its :tool-store-file.  Return the completed entry with its :item-id;
-callers own any chat recovery checkpoint and provider dispatch."
+(defun ende-transcript--record-host-text (job kind text save &optional request-id question-id)
+  "Record JOB's exact TEXT as KIND, using SAVE before publishing the entry.
+REQUEST-ID and QUESTION-ID default to the owning chat instruction."
   (require 'ende-tool-store)
   (let* ((instruction (ende-job-instruction job))
-         (transcript (ende-job-ensure-transcript job)))
-    (when (ende-transcript-entries transcript)
-      (error "Capabilities must be recorded before other transcript entries"))
-    (let ((id (ende-tool-store-save-capabilities
+         (transcript (ende-job-ensure-transcript job))
+         (entries (ende-transcript-entries transcript)))
+    (unless (or (null entries)
+                (and (eq kind 'skills) (null (cdr entries))
+                     (eq (ende-transcript-entry-kind (car entries)) 'capabilities)))
+      (error "Misplaced host %s transcript entry" kind))
+    (let ((id (funcall save
                (or request-id (plist-get instruction :request-id))
                (or question-id (plist-get instruction :question-id)) text
                (plist-get instruction :tool-store-file))))
-      (ende-transcript-append transcript 'capabilities text (list :item-id id) 'complete))))
+      (ende-transcript-append transcript kind text (list :item-id id) 'complete))))
+
+(defun ende-transcript-record-capabilities (job text &optional request-id question-id)
+  "Durably record JOB's exact capability TEXT as its first transcript entry.
+REQUEST-ID and QUESTION-ID default to JOB's instruction properties."
+  (ende-transcript--record-host-text job 'capabilities text #'ende-tool-store-save-capabilities
+                                    request-id question-id))
+
+(defun ende-transcript-record-skills (job text)
+  "Durably record JOB's exact skill TEXT after any initial capability snapshot."
+  (ende-transcript--record-host-text job 'skills text #'ende-tool-store-save-skills))
 
 (defun ende-transcript--interrupt-response (transcript)
   "Retain unfinished entries in TRANSCRIPT as interrupted."

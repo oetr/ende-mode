@@ -471,8 +471,8 @@ Host-owned records are never provider opaque items.  Return nil if absent."
               (text (gethash "reasoning_content" item)) ((stringp text)))
     text))
 
-(defun ende-tool-store--validate-capabilities (item request-id question-id)
-  "Validate host capability ITEM against REQUEST-ID and QUESTION-ID."
+(defun ende-tool-store--validate-host-text (item request-id question-id)
+  "Validate a host text ITEM against REQUEST-ID and QUESTION-ID."
   (unless (and (hash-table-p item) (= (hash-table-count item) 3)
                (cl-every (lambda (id)
                            (and (stringp id) (not (string-empty-p id))
@@ -481,28 +481,39 @@ Host-owned records are never provider opaque items.  Return nil if absent."
                (equal (gethash "request_id" item) request-id)
                (equal (gethash "question_id" item) question-id)
                (stringp (gethash "text" item)))
-    (error "Malformed or mismatched host capability record"))
+    (error "Malformed or mismatched host text record"))
   item)
 
-(defun ende-tool-store-save-capabilities (request-id question-id text &optional filename)
-  "Store exact capability TEXT for REQUEST-ID and QUESTION-ID in FILENAME.
-Return the immutable host protocol item's identity."
+(defun ende-tool-store--save-host-text (kind request-id question-id text filename)
+  "Store immutable host TEXT of KIND for REQUEST-ID and QUESTION-ID in FILENAME."
   (let ((item (make-hash-table :test #'equal)))
     (puthash "request_id" request-id item)
     (puthash "question_id" question-id item)
     (puthash "text" text item)
-    (ende-tool-store--validate-capabilities item request-id question-id)
-    (ende-tool-store--save-protocol-item "ende" "capabilities" item filename)))
+    (ende-tool-store--validate-host-text item request-id question-id)
+    (ende-tool-store--save-protocol-item "ende" kind item filename)))
 
-(defun ende-tool-store-load-capabilities (id request-id question-id &optional filename)
-  "Return exact capability text for ID, REQUEST-ID and QUESTION-ID in FILENAME.
+(defun ende-tool-store-save-capabilities (request-id question-id text &optional filename)
+  "Store exact capability TEXT for REQUEST-ID and QUESTION-ID in FILENAME."
+  (ende-tool-store--save-host-text "capabilities" request-id question-id text filename))
+
+(defun ende-tool-store-save-skills (request-id question-id text &optional filename)
+  "Store exact skill TEXT for REQUEST-ID and QUESTION-ID in FILENAME."
+  (ende-tool-store--save-host-text "skills" request-id question-id text filename))
+
+(defun ende-tool-store-load-host-text (kind id request-id question-id &optional filename)
+  "Read KIND's exact text for ID, REQUEST-ID and QUESTION-ID in FILENAME.
 Missing, mismatched or corrupt host records are replay errors."
   (let ((record (ende-tool-store--load-protocol-item id filename)))
-    (unless (and record (equal (plist-get record :provider) "ende")
-                 (equal (plist-get record :kind) "capabilities"))
-      (error "Missing or mismatched host capability item %s" id))
-    (gethash "text" (ende-tool-store--validate-capabilities
+    (unless (and record (member kind '("capabilities" "skills"))
+                 (equal (plist-get record :provider) "ende") (equal (plist-get record :kind) kind))
+      (error "Missing or mismatched host %s item %s" kind id))
+    (gethash "text" (ende-tool-store--validate-host-text
                      (plist-get record :item) request-id question-id))))
+
+(defun ende-tool-store-load-capabilities (id request-id question-id &optional filename)
+  "Read exact capability text for ID, REQUEST-ID and QUESTION-ID in FILENAME."
+  (ende-tool-store-load-host-text "capabilities" id request-id question-id filename))
 
 (defun ende-tool-store--footprint ()
   "Return the configured filename and existing database files with sizes."

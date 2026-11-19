@@ -407,11 +407,11 @@ so a directive completed by a later chunk can still be escaped in place."
      (and response (gethash (ende-transcript-entry-id response) ende-work-buffer--metadata))
      (ende-org--property "ENDE_CHAT_REQUEST_ID"
                          (plist-get (ende-job-instruction ende-work-buffer--job) :request-id))
-     (when (eq kind 'capabilities)
+     (when (memq kind '(capabilities skills))
        (concat (ende-org--property "ENDE_CHAT_REPLY_TO"
                                   (plist-get (ende-job-instruction ende-work-buffer--job) :question-id))
                (ende-org--property "ENDE_PROTOCOL_PROVIDER" "ende")
-               (ende-org--property "ENDE_PROTOCOL_ITEM_KIND" "capabilities")
+               (ende-org--property "ENDE_PROTOCOL_ITEM_KIND" (symbol-name kind))
                (ende-org--property "ENDE_PROTOCOL_ITEM_ID"
                                   (plist-get (ende-transcript-entry-data entry) :item-id))))
      (when (eq kind 'response)
@@ -467,7 +467,7 @@ so a directive completed by a later chunk can still be escaped in place."
          (cond ((eq (ende-transcript-entry-status entry) 'interrupted) "Agent: Interrupted reply")
                (final "Agent: Final reply") (t "Agent: Reply"))))
       ((or 'tool-call 'tool-result) (ende-work-buffer--tool-title entry section))
-      ('capabilities "Agent: Capabilities")
+      ((and (or 'capabilities 'skills) kind) (concat "Agent: " (capitalize (symbol-name kind))))
       ('context-fence "Agent: Context Fence")
       ('opaque "Agent: Opaque BS")
       ('thinking "Agent: Reasoning")
@@ -514,7 +514,7 @@ so a directive completed by a later chunk can still be escaped in place."
          ((not (or (eq kind 'response) (and (not new) (eq change 'metadata))))
           (ende-work-buffer--render-body section entry)))
         (when (and new (or (plist-get presentation :folded)
-                          (memq kind '(capabilities opaque thinking summary progress))))
+                          (memq kind '(capabilities skills opaque thinking summary progress))))
           (save-excursion
             (goto-char (ende-work-buffer--section-start section))
             (org-fold-hide-subtree)))))))
@@ -532,7 +532,7 @@ so a directive completed by a later chunk can still be escaped in place."
 (defun ende-work-buffer--detail-p (section)
   "Return whether SECTION owns an expensive, deferrable payload."
   (when-let* ((entry (ende-work-buffer--section-entry section)))
-    (memq (ende-transcript-entry-kind entry) '(capabilities opaque))))
+    (memq (ende-transcript-entry-kind entry) '(capabilities skills opaque))))
 
 (defun ende-work-buffer--queue-exposed (section)
   "Queue SECTION's deferred body only if it is exposed and stale."

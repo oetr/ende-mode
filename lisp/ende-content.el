@@ -44,6 +44,10 @@
   "Return a host-typed capability snapshot containing TEXT."
   (list :role "system" :host-kind 'capabilities :content text))
 
+(defun ende-content-skills (text)
+  "Return captured project skill TEXT as user-level context, not a user task."
+  (list :role "user" :host-kind 'skills :content text))
+
 (defun ende-content-capabilities-p (message)
   "Return non-nil when MESSAGE is a host-typed capability snapshot."
   (and (consp message) (not (stringp (car message)))
