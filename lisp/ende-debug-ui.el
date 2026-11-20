@@ -16,7 +16,7 @@
 (defvar ende-debug-ui--buffer nil)
 (defvar-local ende-debug-ui--owned-buffer nil)
 (defvar-local ende-debug-ui--job nil)
-(defvar-local ende-debug-ui--expanded t)
+(defvar-local ende-debug-ui--show-detail-events t)
 (defvar-local ende-debug-ui--detail-event nil)
 
 (defun ende-debug-ui--job-event (job event)
@@ -151,7 +151,7 @@
     (insert (format "SESSION %d   %s   %s   JOB %s\n"
                     ende-diagnostics-session
                     (if ende-diagnostics-enabled "RECORDING" "STOPPED")
-                    (if ende-debug-ui--expanded "TIMELINE" "SUMMARY")
+                    (if ende-debug-ui--show-detail-events "TIMELINE" "SUMMARY")
                     (or ende-debug-ui--job "ALL")))
     (insert (propertize "TAB timeline   RET fields   g refresh   e export   a all jobs   q quit\n"
                         'face 'shadow))
@@ -162,7 +162,8 @@
                                         "TIME" " " "JOB" "REQ/TRY" "EVENT" "DETAILS")
                                 'face 'bold))
     (dolist (event (ende-diagnostics-events ende-debug-ui--job))
-      (when (or ende-debug-ui--expanded (not (eq (plist-get event :level) 'detail)))
+      (when (or ende-debug-ui--show-detail-events
+                (not (eq (plist-get event :level) 'detail)))
         (let ((start (ende-debug-ui--insert-event event)))
           (when (equal event selected)
             (setq selected-position start)))))
@@ -172,7 +173,8 @@
 (defun ende-debug-ui-toggle-timeline ()
   "Toggle expanded start/detail events without altering recording."
   (interactive)
-  (setq ende-debug-ui--expanded (not ende-debug-ui--expanded))
+  (setq ende-debug-ui--show-detail-events
+        (not ende-debug-ui--show-detail-events))
   (ende-debug-ui-refresh))
 
 (defun ende-debug-ui-event-details ()
