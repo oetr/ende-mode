@@ -117,6 +117,30 @@
                             (ende-debug-ui--value key (plist-get event key))))
    " "))
 
+(defun ende-debug-ui--insert-event (event)
+  "Insert EVENT and its visible fields, returning the row's start."
+  (pcase-let* ((`(,mark ,face) (ende-debug-ui--appearance event))
+               (label (upcase (replace-regexp-in-string
+                               "-" " " (symbol-name (plist-get event :kind)))))
+               (request (plist-get event :request))
+               (start (point)))
+    (insert (format "%s  %s  %4s  %7s  %s %s\n"
+                    (propertize (format-time-string "%H:%M:%S.%3N" (plist-get event :time))
+                                'face 'shadow)
+                    (propertize mark 'face face)
+                    (or (plist-get event :job) "—")
+                    (if request (format "%s/%s" request (plist-get event :attempt)) "—")
+                    (propertize (format "%-19s" label) 'face face)
+                    (ende-debug-ui--details event)))
+    (when (equal event ende-debug-ui--detail-event)
+      (cl-loop for (key value) on event by #'cddr
+               unless (memq key '(:time :level :kind))
+               do (insert (format "    │ %-18s %s\n"
+                                  (propertize (upcase (substring (symbol-name key) 1)) 'face 'shadow)
+                                  (ende-debug-ui--value key value)))))
+    (put-text-property start (point) 'ende-debug-event event)
+    start))
+
 (defun ende-debug-ui-refresh ()
   "Refresh the current metadata view without changing the retained events."
   (interactive)
@@ -141,30 +165,9 @@
                                 'face 'bold))
     (dolist (event (ende-diagnostics-events ende-debug-ui--job))
       (when (or ende-debug-ui--expanded (not (eq (plist-get event :level) 'detail)))
-        (pcase-let* ((`(,mark ,face) (ende-debug-ui--appearance event))
-                     (kind (plist-get event :kind))
-                     (request (plist-get event :request))
-                     (start (point)))
-          (insert (format "%s  %s  %4s  %7s  %s %s\n"
-                          (propertize (format-time-string "%H:%M:%S.%3N" (plist-get event :time))
-                                      'face 'shadow)
-                          (propertize mark 'face face)
-                          (or (plist-get event :job) "—")
-                          (if request (format "%s/%s" request (plist-get event :attempt)) "—")
-                          (propertize (format "%-19s" (upcase (replace-regexp-in-string "-" " " (symbol-name kind))))
-                                      'face face)
-                          (ende-debug-ui--details event)))
+        (let ((start (ende-debug-ui--insert-event event)))
           (when (equal event selected)
-            (setq selected-position start))
-          (when (equal event ende-debug-ui--detail-event)
-            (let ((fields event))
-              (while fields
-                (let ((key (pop fields)) (value (pop fields)))
-                  (unless (memq key '(:time :level :kind))
-                    (insert (format "    │ %-18s %s\n"
-                                    (propertize (upcase (substring (symbol-name key) 1)) 'face 'shadow)
-                                    (ende-debug-ui--value key value))))))))
-          (add-text-properties start (point) (list 'ende-debug-event event)))))
+            (setq selected-position start)))))
     (goto-char (or selected-position (min position (point-max))))
     (when selected-position (move-to-column column))))
 
