@@ -1,4 +1,6 @@
 (root ".")
+(skills t)
+
 (group read-only project_info file_info list_project_files read_file search_project)
 (group write-only edit_file create_file apply_patch)
 
@@ -9,6 +11,7 @@
 	  (include "Makefile")
 	  (include "Containerfile")
 	  (include "LICENSE")
+	  (include ".agents/skills/*")
 	  ;;(include "sandbox-tmp/*")
 	  (exclude ".ende/*"))
 
